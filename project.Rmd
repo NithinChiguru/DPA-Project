@@ -1,0 +1,142 @@
+---
+title: "Project"
+author: "Nithin Chiguru"
+date: "2025-04-28"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r,fig.width=8, fig.height=6, dpi=300}
+library(keras)
+library(tensorflow)
+library(ggplot2)
+library(caret)
+library(reticulate)
+
+# Read data
+data <- read.csv("~/Downloads/DPA /DPA 2025-Spring/Assignments/Project/Project/handwritten.csv")
+X <- data[, -1]
+y <- data[, 1]
+
+# Shuffle data
+set.seed(42)
+shuffled <- sample(nrow(data))
+X <- X[shuffled, ]
+y <- y[shuffled]
+
+# Alphabet dictionary
+word_dict <- c("A","B","C","D","E","F","G","H","I","J","K","L","M",
+               "N","O","P","Q","R","S","T","U","V","W","X","Y","Z")
+
+# Plot class distribution
+y_int <- as.integer(y)
+count <- table(factor(y_int, levels = 0:25))
+
+ggplot(data.frame(alphabets = word_dict, count = as.numeric(count)), 
+       aes(x = alphabets, y = count)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Alphabets", y = "Number of elements") +
+  coord_flip() +
+  theme_minimal()
+
+# Train-test split
+set.seed(1)
+trainIndex <- createDataPartition(y, p = 0.8, list = FALSE)
+x_train <- X[trainIndex, ]
+x_test <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test <- y[-trainIndex]
+
+# Reshape data
+reshape_images <- function(df) {
+  array_reshape(as.matrix(df), c(nrow(df), 28, 28, 1))
+}
+
+x_train <- reshape_images(x_train)
+x_test <- reshape_images(x_test)
+
+# One-hot encoding
+y_train_OHE <- to_categorical(y_train, num_classes = 26)
+y_test_OHE <- to_categorical(y_test, num_classes = 26)
+
+# Semi-supervised setup
+n_train <- dim(x_train)[1]  # Get total training samples
+
+unlabeled_data <- x_train[1:2000,,,, drop = FALSE]
+labeled_data <- x_train[2001:n_train,,,, drop = FALSE]
+labeled_labels <- y_train_OHE[2001:n_train, ]  # Correct row indexing
+
+# Verify dimensions
+cat("Unlabeled data dim:", dim(unlabeled_data), "\n")
+cat("Labeled data dim:", dim(labeled_data), "\n")
+cat("Labeled labels dim:", dim(labeled_labels), "\n")
+
+# Model architecture
+model <- keras_model_sequential() %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = "relu", input_shape = c(28,28,1)) %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = 2) %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = 2) %>%
+  layer_conv_2d(filters = 128, kernel_size = c(3,3), activation = "relu", padding = "valid") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = 2) %>%
+  layer_flatten() %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dense(units = 128, activation = "relu") %>%
+  layer_dense(units = 26, activation = "softmax")
+
+model %>% compile(
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  loss = "categorical_crossentropy",
+  metrics = c("acc")
+)
+
+# Training
+start_time <- Sys.time()
+history <- model %>% fit(
+  labeled_data, labeled_labels,
+  epochs = 5,
+  validation_data = list(x_test, y_test_OHE)
+)
+
+# Generate pseudo-labels
+pseudo_labels <- predict(model, unlabeled_data)
+high_confidence <- apply(pseudo_labels, 1, max) >= 0.9
+pseudo_labeled_data <- unlabeled_data[high_confidence,,,, drop = FALSE]
+pseudo_labels <- apply(pseudo_labels[high_confidence,], 1, which.max) - 1
+pseudo_labeled_labels <- to_categorical(pseudo_labels, num_classes = 26)
+
+# Combine data
+combined_data <- abind::abind(labeled_data, pseudo_labeled_data, along = 1)
+combined_labels <- rbind(labeled_labels, pseudo_labeled_labels)
+
+# Retrain with combined data
+history <- model %>% fit(
+  combined_data, combined_labels,
+  epochs = 2,
+  validation_data = list(x_test, y_test_OHE)
+)
+
+Sys.sleep(2)
+end_time <- Sys.time()
+print(paste("Elapsed time:", end_time - start_time))
+
+# Save and evaluate
+# Save and evaluate
+save_model_hdf5(model, "semi_supervised_handwritten_model.h5")
+score <- evaluate(model, x_test, y_test_OHE)
+print(paste("Loss:", score["loss"]))
+print(paste("Accuracy:", score["acc"]))
+
+# Plot training history
+history_df <- data.frame(
+  epoch = rep(1:length(history$metrics$acc), 2),
+  accuracy = c(history$metrics$acc, history$metrics$val_acc),
+  type = rep(c("Training", "Validation"), each = length(history$metrics$acc))
+)
+
+ggplot(history_df, aes(x = epoch, y = accuracy, color = type)) +
+  geom_line() +
+  labs(x = "Epochs", y = "Accuracy", title = "Training and Validation Accuracy per Epoch") +
+  theme_minimal()
+```
